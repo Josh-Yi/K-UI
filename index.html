@@ -1275,7 +1275,16 @@ body.theme11 #app, body.theme13 #app, body.theme14 #app, body.theme15 #app, body
                             isLoggedIn.value = true; showLoginModal.value = false; password.value = ''; const publicSocket = publicRealtimeSocket; publicRealtimeSocket = null; publicSocket?.close(); clearTimeout(publicRealtimeReconnectTimer); clearTimeout(publicRealtimeFallbackTimer); clearInterval(publicRealtimeActivityTimer);
                             activeTab.value = role.value === 'admin' ? 'nodes' : 'dashboard';
                             startPolling(); fetchProbeData(); queueMicrotask(connectRealtime);
-                        } else alert('⚠️ 账户名或密码错误');
+                        } else {
+                            let message = '⚠️ 账户名或密码错误';
+                            try {
+                                const err = await res.json();
+                                if (res.status === 429) message = '⏳ 登录失败次数过多，已临时锁定 15 分钟，稍后再试（这不是密码错误）';
+                                else if (res.status >= 500) message = `❌ 服务端配置问题: ${err.error || res.status}${err.hint ? `\n${err.hint}` : ''}`;
+                                else if (err.hint) message = `⚠️ ${err.hint}`;
+                            } catch (e) {}
+                            alert(message);
+                        }
                     } catch (e) { alert('登录异常'); }
                 };
                 

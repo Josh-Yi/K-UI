@@ -1548,16 +1548,21 @@ rules:
 
     if (action === "login" && method === "POST") {
         await ensureDbSchema(db);
-        if (!(await loginAllowed(db, request))) return Response.json({ error: "Too many attempts" }, { status: 429, headers: { 'Retry-After': '900' } });
+        // 环境变量没有真正生效时给出明确提示，而不是笼统的“密码错误”。
+        if (!env.ADMIN_PASSWORD) return Response.json({ error: "ADMIN_PASSWORD is not configured for this deployment", hint: '请在 Cloudflare Pages → Settings → Environment variables → Production 添加 ADMIN_PASSWORD (Secret) 后重新部署' }, { status: 500, headers: { 'Cache-Control': 'no-store' } });
+        if (!(await loginAllowed(db, request))) return Response.json({ error: "Too many attempts", hint: '登录失败次数过多，已被临时锁定，请 15 分钟后再试（不是密码错误）' }, { status: 429, headers: { 'Retry-After': '900', 'Cache-Control': 'no-store' } });
         let credentials;
         try { credentials = await readJsonBody(request, 8 * 1024); } catch { credentials = {}; }
-        const username = String(credentials.username || '').trim(); const password = String(credentials.password || '');
+        const username = String(credentials.username || '').trim(); const rawPassword = String(credentials.password || '');
+        // 密码按原样比对，但同时容忍首尾空白（面板里粘贴 Secret 时很容易带上空格或换行）。
+        const passwordCandidates = new Set([rawPassword, rawPassword.trim()]);
+        const matchesSecret = value => { const secret = String(value); return passwordCandidates.has(secret) || passwordCandidates.has(secret.trim()); };
         let valid = false;
-        if (username === (env.ADMIN_USERNAME || 'admin')) valid = password.length > 0 && password === env.ADMIN_PASSWORD;
-        else { const user = await db.prepare('SELECT password FROM users WHERE username = ? AND enable = 1').bind(username).first(); valid = !!user && await passwordMatches(password, user.password); if (valid && /^[0-9a-f]{64}$/i.test(user.password || '')) await db.prepare('UPDATE users SET password = ? WHERE username = ?').bind(await passwordHash(password), username).run(); }
-        if (valid) { const token = await sessionToken(); await db.prepare('INSERT INTO auth_sessions (token_hash, username, expires_at) VALUES (?, ?, ?)').bind(await sha256(token), username, Date.now() + 12 * 60 * 60 * 1000).run(); context.waitUntil(db.prepare('DELETE FROM auth_sessions WHERE expires_at < ?').bind(Date.now()).run().catch(() => {})); await db.prepare('DELETE FROM login_throttles WHERE key = ?').bind(loginThrottleKey(request)).run(); return Response.json({ success: true, token, role: username === (env.ADMIN_USERNAME || "admin") ? 'admin' : 'user' }); }
+        if (username === (env.ADMIN_USERNAME || 'admin').toString().trim()) valid = rawPassword.length > 0 && matchesSecret(env.ADMIN_PASSWORD);
+        else { const user = await db.prepare('SELECT password FROM users WHERE username = ? AND enable = 1').bind(username).first(); valid = !!user && await passwordMatches(rawPassword, user.password); if (valid && /^[0-9a-f]{64}$/i.test(user.password || '')) await db.prepare('UPDATE users SET password = ? WHERE username = ?').bind(await passwordHash(rawPassword), username).run(); }
+        if (valid) { const token = await sessionToken(); await db.prepare('INSERT INTO auth_sessions (token_hash, username, expires_at) VALUES (?, ?, ?)').bind(await sha256(token), username, Date.now() + 12 * 60 * 60 * 1000).run(); context.waitUntil(db.prepare('DELETE FROM auth_sessions WHERE expires_at < ?').bind(Date.now()).run().catch(() => {})); await db.prepare('DELETE FROM login_throttles WHERE key = ?').bind(loginThrottleKey(request)).run(); return Response.json({ success: true, token, role: username === (env.ADMIN_USERNAME || "admin").toString().trim() ? 'admin' : 'user' }); }
         await recordLoginFailure(db, request);
-        return Response.json({ error: "Unauthorized" }, { status: 401 });
+        return Response.json({ error: "Unauthorized", hint: '用户名或密码不正确，请注意不要带多余的空格' }, { status: 401, headers: { 'Cache-Control': 'no-store' } });
     }
 
     if (action === "realtime_auth" && method === "POST") {
